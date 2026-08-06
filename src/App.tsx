@@ -5,14 +5,16 @@ import { TongueClickDetector } from './gesture'
 type Point = { x: number; y: number }
 type Status = 'idle' | 'loading' | 'ready' | 'calibrating' | 'tracking' | 'error'
 
-// WebEyeTrack retains five personalization samples. This ordering covers the
-// whole viewport and leaves the center as the final, most recent sample.
 const CALIBRATION_POINTS: Point[] = [
   { x: 0.12, y: 0.14 },
+  { x: 0.5, y: 0.14 },
   { x: 0.88, y: 0.14 },
-  { x: 0.12, y: 0.86 },
-  { x: 0.88, y: 0.86 },
+  { x: 0.12, y: 0.5 },
   { x: 0.5, y: 0.5 },
+  { x: 0.88, y: 0.5 },
+  { x: 0.12, y: 0.86 },
+  { x: 0.5, y: 0.86 },
+  { x: 0.88, y: 0.86 },
 ]
 
 const normalizedPoint = (normPog: number[]): Point => ({
@@ -105,7 +107,9 @@ function App() {
         if (!result.facialLandmarks.length) return
         const score = tongueScoreFrom(result)
         setTongueScore(score)
-        if (statusRef.current !== 'tracking' || result.gazeState === 'closed') return
+        // WebEyeTrack's blink state is useful metadata, but it is not reliable
+        // enough across faces/cameras to gate all cursor movement.
+        if (statusRef.current !== 'tracking') return
 
         const stable = stabilize(smoothPointRef.current, normalizedPoint(result.normPog))
         smoothPointRef.current = stable
@@ -213,7 +217,7 @@ function App() {
           <p className="message">{message}</p>
           <div className="steps">
             <div className={status !== 'idle' ? 'done' : ''}><b>1</b><span>Enable camera<small>Your video never leaves this browser.</small></span></div>
-            <div className={calibrated ? 'done' : ''}><b>2</b><span>Personalize WebEyeTrack<small>Follow five dots with your eyes.</small></span></div>
+            <div className={calibrated ? 'done' : ''}><b>2</b><span>Personalize WebEyeTrack<small>Follow nine dots with your eyes.</small></span></div>
             <div className={active ? 'done' : ''}><b>3</b><span>Go hands-free<small>Tongue out = click. Esc = pause.</small></span></div>
           </div>
           <div className="actions">
@@ -232,7 +236,7 @@ function App() {
       </section>
 
       {active && <div className={`gaze-cursor ${lastClick && Date.now() - lastClick < 350 ? 'clicked' : ''}`} style={{ left: `${cursor.x * 100}%`, top: `${cursor.y * 100}%` }} />}
-      {target && <div className="calibration-overlay"><div className="calibration-copy">LOOK AT THE DOT <b>{calibrationIndex + 1}/5</b></div><div className="calibration-dot" style={{ left: `${target.x * 100}%`, top: `${target.y * 100}%` }} /></div>}
+      {target && <div className="calibration-overlay"><div className="calibration-copy">LOOK AT THE DOT <b>{calibrationIndex + 1}/{CALIBRATION_POINTS.length}</b></div><div className="calibration-dot" style={{ left: `${target.x * 100}%`, top: `${target.y * 100}%` }} /></div>}
     </main>
   )
 }

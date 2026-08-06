@@ -19,7 +19,7 @@ npm install
 npm run dev
 ```
 
-Open the local URL in current Chrome or Edge, allow camera access, and calibrate while sitting naturally. Look directly at each of the five dots while WebEyeTrack captures its personalization sample. Voice recognition support varies by browser and may use the browser vendor's speech service.
+Open the local URL in current Chrome or Edge, allow camera access, and calibrate while sitting naturally. Look directly at each of the nine dots while WebEyeTrack captures its personalization sample. Voice recognition support varies by browser and may use the browser vendor's speech service.
 
 ## Limits
 
