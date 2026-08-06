@@ -7,13 +7,12 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "test": "vitest run",
-    "check": "npm test && npm run build",
-    "postinstall": "node scripts/patch-webeyetrack.mjs"
+    "check": "npm test && npm run build"
   },
   "dependencies": {
+    "@mediapipe/tasks-vision": "0.10.18",
     "react": "^19.2.0",
-    "react-dom": "^19.2.0",
-    "webeyetrack": "^0.0.2"
+    "react-dom": "^19.2.0"
   },
   "devDependencies": {
     "@types/react": "^19.2.0",
@@ -22,10 +21,5 @@
     "typescript": "~6.0.2",
     "vite": "^7.2.0",
     "vitest": "^4.0.0"
-  },
-  "overrides": {
-    "webeyetrack": {
-      "mathjs": "^15.2.0"
-    }
   }
 }
