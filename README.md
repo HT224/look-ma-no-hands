@@ -10,6 +10,8 @@ All camera processing happens locally in the browser with MediaPipe Face Landmar
 
 Live app: https://look-ma-no-hands.vercel.app
 
+Source: https://github.com/HT224/look-ma-no-hands
+
 ## Run it
 
 ```bash
