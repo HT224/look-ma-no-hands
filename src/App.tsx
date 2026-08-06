@@ -1,39 +1,41 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { FaceLandmarker, FilesetResolver, type NormalizedLandmark } from '@mediapipe/tasks-vision'
-import { CALIBRATION_POINTS, fitCalibration, projectGaze, type CalibrationModel, type GazeSample, type Point } from './calibration'
+import { WebcamClient, WebEyeTrackProxy, type GazeResult } from 'webeyetrack'
 import { TongueClickDetector } from './gesture'
 
+type Point = { x: number; y: number }
 type Status = 'idle' | 'loading' | 'ready' | 'calibrating' | 'tracking' | 'error'
 
-const average = (values: number[]) => values.reduce((sum, value) => sum + value, 0) / values.length
-const irisCenter = (landmarks: NormalizedLandmark[], indexes: number[]) => ({
-  x: average(indexes.map((index) => landmarks[index].x)),
-  y: average(indexes.map((index) => landmarks[index].y)),
+// WebEyeTrack retains five personalization samples. This ordering covers the
+// whole viewport and leaves the center as the final, most recent sample.
+const CALIBRATION_POINTS: Point[] = [
+  { x: 0.12, y: 0.14 },
+  { x: 0.88, y: 0.14 },
+  { x: 0.12, y: 0.86 },
+  { x: 0.88, y: 0.86 },
+  { x: 0.5, y: 0.5 },
+]
+
+const normalizedPoint = (normPog: number[]): Point => ({
+  x: Math.min(1, Math.max(0, normPog[0] + 0.5)),
+  y: Math.min(1, Math.max(0, normPog[1] + 0.5)),
 })
 
-const gazeFeatures = (landmarks: NormalizedLandmark[]) => {
-  const left = irisCenter(landmarks, [468, 469, 470, 471, 472])
-  const right = irisCenter(landmarks, [473, 474, 475, 476, 477])
-  const leftWidth = Math.abs(landmarks[133].x - landmarks[33].x) || 0.01
-  const rightWidth = Math.abs(landmarks[263].x - landmarks[362].x) || 0.01
-  const leftHeight = Math.abs(landmarks[159].y - landmarks[145].y) || 0.01
-  const rightHeight = Math.abs(landmarks[386].y - landmarks[374].y) || 0.01
-  const horizontal = average([
-    (left.x - Math.min(landmarks[33].x, landmarks[133].x)) / leftWidth,
-    (right.x - Math.min(landmarks[362].x, landmarks[263].x)) / rightWidth,
-  ])
-  const vertical = average([
-    (left.y - Math.min(landmarks[159].y, landmarks[145].y)) / leftHeight,
-    (right.y - Math.min(landmarks[386].y, landmarks[374].y)) / rightHeight,
-  ])
-  const faceLeft = landmarks[234]
-  const faceRight = landmarks[454]
-  const faceTop = landmarks[10]
-  const faceBottom = landmarks[152]
-  const headX = (landmarks[1].x - faceLeft.x) / (faceRight.x - faceLeft.x || 0.01)
-  const headY = (landmarks[1].y - faceTop.y) / (faceBottom.y - faceTop.y || 0.01)
-  return [horizontal, vertical, headX, headY]
+const stabilize = (previous: Point, next: Point): Point => {
+  const width = Math.max(window.innerWidth, 1)
+  const height = Math.max(window.innerHeight, 1)
+  const pixelDistance = Math.hypot((next.x - previous.x) * width, (next.y - previous.y) * height)
+  if (pixelDistance < 7) return previous
+  // WebEyeTrack already applies a Kalman filter. This light presentation layer
+  // damps webcam micro-jitter while still allowing fast long-distance travel.
+  const alpha = Math.min(0.42, Math.max(0.12, pixelDistance / 450))
+  return {
+    x: previous.x + (next.x - previous.x) * alpha,
+    y: previous.y + (next.y - previous.y) * alpha,
+  }
 }
+
+const tongueScoreFrom = (result: GazeResult) =>
+  result.faceBlendshapes[0]?.categories.find((category) => category.categoryName === 'tongueOut')?.score ?? 0
 
 const clickAt = (point: Point) => {
   const x = point.x * window.innerWidth
@@ -44,90 +46,33 @@ const clickAt = (point: Point) => {
 
 function App() {
   const videoRef = useRef<HTMLVideoElement>(null)
-  const landmarkerRef = useRef<FaceLandmarker | null>(null)
-  const frameRef = useRef<number | null>(null)
+  const proxyRef = useRef<WebEyeTrackProxy | null>(null)
   const detectorRef = useRef(new TongueClickDetector())
-  const modelRef = useRef<CalibrationModel | null>(null)
-  const samplesRef = useRef<GazeSample[]>([])
-  const calibrationStartedRef = useRef(0)
-  const calibrationIndexRef = useRef(-1)
+  const statusRef = useRef<Status>('idle')
   const smoothPointRef = useRef<Point>({ x: 0.5, y: 0.5 })
+  const calibrationTimerRef = useRef<number | null>(null)
   const recognitionRef = useRef<SpeechRecognition | null>(null)
   const transcriptRef = useRef('')
 
-  const [status, setStatus] = useState<Status>('idle')
+  const [status, setStatusState] = useState<Status>('idle')
   const [message, setMessage] = useState('Camera stays on this device. Nothing is recorded.')
   const [cursor, setCursor] = useState<Point>({ x: 0.5, y: 0.5 })
   const [calibrationIndex, setCalibrationIndex] = useState(-1)
+  const [calibrated, setCalibrated] = useState(false)
   const [tongueScore, setTongueScore] = useState(0)
   const [lastClick, setLastClick] = useState<number | null>(null)
   const [dictating, setDictating] = useState(false)
   const [transcript, setTranscript] = useState('')
 
-  const processFrame = useCallback(() => {
-    const video = videoRef.current
-    const landmarker = landmarkerRef.current
-    if (!video || !landmarker || video.readyState < 2) {
-      frameRef.current = requestAnimationFrame(processFrame)
-      return
-    }
-    const now = performance.now()
-    const result = landmarker.detectForVideo(video, now)
-    const landmarks = result.faceLandmarks[0]
-    if (landmarks) {
-      const features = gazeFeatures(landmarks)
-      const activeCalibrationIndex = calibrationIndexRef.current
-      if (activeCalibrationIndex >= 0) {
-        const elapsed = now - calibrationStartedRef.current
-        if (elapsed > 450 && elapsed < 1150) {
-          samplesRef.current.push({ features, target: CALIBRATION_POINTS[activeCalibrationIndex] })
-        }
-        if (elapsed >= 1200) {
-          const next = activeCalibrationIndex + 1
-          if (next < CALIBRATION_POINTS.length) {
-            calibrationIndexRef.current = next
-            setCalibrationIndex(next)
-            calibrationStartedRef.current = now
-          } else {
-            calibrationIndexRef.current = -1
-            setCalibrationIndex(-1)
-            try {
-              modelRef.current = fitCalibration(samplesRef.current)
-              setStatus('tracking')
-              setMessage('Tracking. Look to move, stick out your tongue to click.')
-            } catch {
-              setStatus('ready')
-              setMessage('Calibration failed. Keep your face visible and try again.')
-            }
-          }
-        }
-      } else if (modelRef.current && status === 'tracking') {
-        const raw = projectGaze(modelRef.current, features)
-        const previous = smoothPointRef.current
-        const smoothed = { x: previous.x * 0.72 + raw.x * 0.28, y: previous.y * 0.72 + raw.y * 0.28 }
-        smoothPointRef.current = smoothed
-        setCursor(smoothed)
-      }
-
-      const categories = result.faceBlendshapes[0]?.categories ?? []
-      const score = categories.find((category) => category.categoryName === 'tongueOut')?.score ?? 0
-      setTongueScore(score)
-      if (status === 'tracking' && detectorRef.current.update(score, now)) {
-        clickAt(smoothPointRef.current)
-        setLastClick(Date.now())
-      }
-    }
-    frameRef.current = requestAnimationFrame(processFrame)
-  }, [status])
-
-  useEffect(() => {
-    frameRef.current = requestAnimationFrame(processFrame)
-    return () => { if (frameRef.current) cancelAnimationFrame(frameRef.current) }
-  }, [processFrame])
+  const setStatus = useCallback((next: Status) => {
+    statusRef.current = next
+    setStatusState(next)
+  }, [])
 
   useEffect(() => () => {
-    videoRef.current?.srcObject && (videoRef.current.srcObject as MediaStream).getTracks().forEach((track) => track.stop())
-    landmarkerRef.current?.close()
+    if (calibrationTimerRef.current) window.clearTimeout(calibrationTimerRef.current)
+    const stream = videoRef.current?.srcObject as MediaStream | null
+    stream?.getTracks().forEach((track) => track.stop())
     recognitionRef.current?.stop()
   }, [])
 
@@ -140,47 +85,78 @@ function App() {
     }
     window.addEventListener('keydown', pauseOnEscape)
     return () => window.removeEventListener('keydown', pauseOnEscape)
-  }, [status])
+  }, [setStatus, status])
 
   const startCamera = async () => {
+    if (!videoRef.current || proxyRef.current) return
     setStatus('loading')
-    setMessage('Loading face tracking…')
+    setMessage('Loading WebEyeTrack’s neural gaze model…')
     try {
-      const vision = await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22-rc.20250304/wasm')
-      landmarkerRef.current = await FaceLandmarker.createFromOptions(vision, {
-        baseOptions: {
-          modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task',
-          delegate: 'GPU',
-        },
-        runningMode: 'VIDEO',
-        outputFaceBlendshapes: true,
-        numFaces: 1,
-      })
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: 1280, height: 720 }, audio: false })
-      if (!videoRef.current) return
-      videoRef.current.srcObject = stream
-      await videoRef.current.play()
-      setStatus('ready')
-      setMessage('Camera ready. Sit comfortably, then calibrate.')
+      const webcamClient = new WebcamClient(videoRef.current.id)
+      const proxy = new WebEyeTrackProxy(webcamClient)
+      proxyRef.current = proxy
+      let firstResult = true
+      proxy.onGazeResults = (result: GazeResult) => {
+        if (firstResult) {
+          firstResult = false
+          setStatus('ready')
+          setMessage('WebEyeTrack is ready. Sit comfortably, then calibrate.')
+        }
+        if (!result.facialLandmarks.length) return
+        const score = tongueScoreFrom(result)
+        setTongueScore(score)
+        if (statusRef.current !== 'tracking' || result.gazeState === 'closed') return
+
+        const stable = stabilize(smoothPointRef.current, normalizedPoint(result.normPog))
+        smoothPointRef.current = stable
+        setCursor(stable)
+        if (detectorRef.current.update(score, performance.now())) {
+          clickAt(stable)
+          setLastClick(Date.now())
+        }
+      }
     } catch (error) {
       setStatus('error')
-      setMessage(error instanceof Error ? error.message : 'Could not start the camera.')
+      setMessage(error instanceof Error ? error.message : 'Could not start WebEyeTrack.')
     }
   }
 
   const calibrate = () => {
-    samplesRef.current = []
-    calibrationIndexRef.current = 0
+    if (!proxyRef.current) return
+    if (calibrationTimerRef.current) window.clearTimeout(calibrationTimerRef.current)
+    setCalibrated(false)
     setCalibrationIndex(0)
-    calibrationStartedRef.current = performance.now()
     setStatus('calibrating')
     setMessage('Keep your head comfortable and look directly at each dot.')
+
+    const capturePoint = (index: number) => {
+      const point = CALIBRATION_POINTS[index]
+      calibrationTimerRef.current = window.setTimeout(() => {
+        // WebEyeTrack personalizes its neural model from click coordinates.
+        window.dispatchEvent(new MouseEvent('click', {
+          clientX: point.x * window.innerWidth,
+          clientY: point.y * window.innerHeight,
+        }))
+        const next = index + 1
+        if (next < CALIBRATION_POINTS.length) {
+          setCalibrationIndex(next)
+          capturePoint(next)
+        } else {
+          setCalibrationIndex(-1)
+          setCalibrated(true)
+          setStatus('tracking')
+          setMessage('Tracking. Look to move, stick out your tongue to click.')
+        }
+      }, 1700)
+    }
+    capturePoint(0)
   }
 
   const toggleTracking = () => {
-    if (!modelRef.current) return calibrate()
-    setStatus((current) => current === 'tracking' ? 'ready' : 'tracking')
-    setMessage(status === 'tracking' ? 'Paused.' : 'Tracking resumed.')
+    if (!calibrated) return calibrate()
+    const resuming = status !== 'tracking'
+    setStatus(resuming ? 'tracking' : 'ready')
+    setMessage(resuming ? 'Tracking resumed.' : 'Paused.')
   }
 
   const toggleDictation = () => {
@@ -221,13 +197,13 @@ function App() {
   return (
     <main>
       <header>
-        <div><span className="eyebrow">EXPERIMENT 001</span><h1>Look Ma,<br /><em>No Hands.</em></h1></div>
+        <div><span className="eyebrow">EXPERIMENT 001 · POWERED BY WEBEYETRACK</span><h1>Look Ma,<br /><em>No Hands.</em></h1></div>
         <div className={`status ${active ? 'live' : ''}`}><span />{status}</div>
       </header>
 
       <section className="hero-grid">
         <div className="camera-card">
-          <video ref={videoRef} muted playsInline />
+          <video id="webeyetrack-camera" ref={videoRef} muted playsInline />
           {status === 'idle' && <div className="camera-empty">👀</div>}
           <div className="camera-label">LOCAL CAMERA FEED</div>
           <div className="tongue-meter"><span style={{ width: `${Math.min(100, tongueScore * 160)}%` }} /></div>
@@ -237,12 +213,12 @@ function App() {
           <p className="message">{message}</p>
           <div className="steps">
             <div className={status !== 'idle' ? 'done' : ''}><b>1</b><span>Enable camera<small>Your video never leaves this browser.</small></span></div>
-            <div className={modelRef.current ? 'done' : ''}><b>2</b><span>Calibrate gaze<small>Follow nine dots with your eyes.</small></span></div>
+            <div className={calibrated ? 'done' : ''}><b>2</b><span>Personalize WebEyeTrack<small>Follow five dots with your eyes.</small></span></div>
             <div className={active ? 'done' : ''}><b>3</b><span>Go hands-free<small>Tongue out = click. Esc = pause.</small></span></div>
           </div>
           <div className="actions">
             {status === 'idle' || status === 'error' ? <button className="primary" onClick={startCamera}>Start camera</button> :
-              !modelRef.current ? <button className="primary" disabled={status === 'loading' || status === 'calibrating'} onClick={calibrate}>Calibrate</button> :
+              !calibrated ? <button className="primary" disabled={status === 'loading' || status === 'calibrating'} onClick={calibrate}>Calibrate</button> :
               <button className="primary" onClick={toggleTracking}>{active ? 'Pause tracking' : 'Resume tracking'}</button>}
             {status !== 'idle' && status !== 'loading' && <button onClick={calibrate}>Recalibrate</button>}
           </div>
@@ -256,7 +232,7 @@ function App() {
       </section>
 
       {active && <div className={`gaze-cursor ${lastClick && Date.now() - lastClick < 350 ? 'clicked' : ''}`} style={{ left: `${cursor.x * 100}%`, top: `${cursor.y * 100}%` }} />}
-      {target && <div className="calibration-overlay"><div className="calibration-copy">LOOK AT THE DOT <b>{calibrationIndex + 1}/9</b></div><div className="calibration-dot" style={{ left: `${target.x * 100}%`, top: `${target.y * 100}%` }} /></div>}
+      {target && <div className="calibration-overlay"><div className="calibration-copy">LOOK AT THE DOT <b>{calibrationIndex + 1}/5</b></div><div className="calibration-dot" style={{ left: `${target.x * 100}%`, top: `${target.y * 100}%` }} /></div>}
     </main>
   )
 }
