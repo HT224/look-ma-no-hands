@@ -1,10 +1,10 @@
 # Look Ma, No Hands
 
-A deliberately silly browser experiment for hands-free interaction:
+A deliberately silly 30-second browser game for hands-free interaction:
 
 - Index-finger tracking controls an in-page cursor.
 - Sticking out your tongue clicks.
-- Browser speech recognition types into a scratchpad.
+- Hit as many moving targets as possible before time runs out.
 
 Finger and tongue tracking are powered by MediaPipe Hand Landmarker and Face Landmarker. All camera processing happens locally in the browser; video is not uploaded or recorded.
 

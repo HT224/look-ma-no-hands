@@ -4,6 +4,7 @@ import { TongueClickDetector, tongueGestureScore } from './gesture'
 
 type Point = { x: number; y: number }
 type Status = 'idle' | 'loading' | 'tracking' | 'paused' | 'error'
+type GamePhase = 'ready' | 'playing' | 'over'
 
 const clamp = (value: number) => Math.min(1, Math.max(0, value))
 
@@ -28,6 +29,11 @@ const clickAt = (point: Point) => {
   target?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, clientX: x, clientY: y, view: window }))
 }
 
+const randomTarget = (): Point => ({
+  x: 0.1 + Math.random() * 0.8,
+  y: 0.15 + Math.random() * 0.7,
+})
+
 function App() {
   const videoRef = useRef<HTMLVideoElement>(null)
   const handRef = useRef<HandLandmarker | null>(null)
@@ -36,8 +42,6 @@ function App() {
   const detectorRef = useRef(new TongueClickDetector())
   const statusRef = useRef<Status>('idle')
   const smoothPointRef = useRef<Point>({ x: 0.5, y: 0.5 })
-  const recognitionRef = useRef<SpeechRecognition | null>(null)
-  const transcriptRef = useRef('')
   const lastFaceFrameRef = useRef(0)
 
   const [status, setStatusState] = useState<Status>('idle')
@@ -46,8 +50,11 @@ function App() {
   const [handVisible, setHandVisible] = useState(false)
   const [tongueScore, setTongueScore] = useState(0)
   const [lastClick, setLastClick] = useState<number | null>(null)
-  const [dictating, setDictating] = useState(false)
-  const [transcript, setTranscript] = useState('')
+  const [gamePhase, setGamePhase] = useState<GamePhase>('ready')
+  const [score, setScore] = useState(0)
+  const [highScore, setHighScore] = useState(() => Number(localStorage.getItem('point-and-lick-high-score') ?? 0))
+  const [timeLeft, setTimeLeft] = useState(30)
+  const [target, setTarget] = useState<Point>(() => randomTarget())
 
   const setStatus = useCallback((next: Status) => {
     statusRef.current = next
@@ -60,8 +67,19 @@ function App() {
     stream?.getTracks().forEach((track) => track.stop())
     handRef.current?.close()
     faceRef.current?.close()
-    recognitionRef.current?.stop()
   }, [])
+
+  useEffect(() => {
+    if (gamePhase !== 'playing' || status !== 'tracking') return
+    const timer = window.setInterval(() => {
+      setTimeLeft((remaining) => {
+        if (remaining > 1) return remaining - 1
+        setGamePhase('over')
+        return 0
+      })
+    }, 1000)
+    return () => window.clearInterval(timer)
+  }, [gamePhase, status])
 
   useEffect(() => {
     const pauseOnEscape = (event: KeyboardEvent) => {
@@ -145,37 +163,31 @@ function App() {
     setMessage(resuming ? 'Tracking resumed. Point with your index finger.' : 'Paused.')
   }
 
-  const toggleDictation = () => {
-    if (dictating) { recognitionRef.current?.stop(); return }
-    const Recognition = window.SpeechRecognition ?? window.webkitSpeechRecognition
-    if (!Recognition) { setMessage('Voice typing is not supported here. Use Chrome or Edge.'); return }
-    const recognition = new Recognition()
-    recognition.continuous = true
-    recognition.interimResults = true
-    recognition.lang = 'en-US'
-    recognition.onresult = (event) => {
-      let committed = transcriptRef.current
-      let interim = ''
-      for (let i = event.resultIndex; i < event.results.length; i += 1) {
-        const phrase = event.results[i][0].transcript
-        if (event.results[i].isFinal) committed += `${phrase.trim()} `
-        else interim += phrase
+  const startGame = () => {
+    setScore(0)
+    setTimeLeft(30)
+    setTarget(randomTarget())
+    setGamePhase('playing')
+  }
+
+  const hitTarget = () => {
+    if (gamePhase !== 'playing') return
+    setScore((current) => {
+      const next = current + 1
+      if (next > highScore) {
+        setHighScore(next)
+        localStorage.setItem('point-and-lick-high-score', String(next))
       }
-      transcriptRef.current = committed
-      setTranscript(committed + interim)
-    }
-    recognition.onerror = (event) => setMessage(`Voice recognition: ${event.error}`)
-    recognition.onend = () => setDictating(false)
-    recognitionRef.current = recognition
-    recognition.start()
-    setDictating(true)
+      return next
+    })
+    setTarget(randomTarget())
   }
 
   const active = status === 'tracking'
   return (
     <main>
       <header>
-        <div><span className="eyebrow">EXPERIMENT 001 · POWERED BY MEDIAPIPE HANDS</span><h1>Look Ma,<br /><em>No Mouse.</em></h1></div>
+        <div><span className="eyebrow">A FINGER + TONGUE ARCADE GAME</span><h1>Point &amp;<br /><em>Lick.</em></h1></div>
         <div className={`status ${active ? 'live' : ''}`}><span />{status}</div>
       </header>
 
@@ -202,10 +214,26 @@ function App() {
         </div>
       </section>
 
-      <section className="playground">
-        <div className="playground-head"><div><span className="eyebrow">VOICE PLAYGROUND</span><h2>Say something.</h2></div><button className={dictating ? 'recording' : ''} onClick={toggleDictation}>{dictating ? '■ Stop listening' : '● Start dictating'}</button></div>
-        <textarea value={transcript} onChange={(event) => { transcriptRef.current = event.target.value; setTranscript(event.target.value) }} placeholder="Your words will land here…" />
-        <div className="targets"><button onClick={() => setMessage('Bullseye one clicked.')}>CLICK ME</button><button onClick={() => setMessage('Bullseye two clicked.')}>NO, ME</button><button onClick={() => setMessage('Excellent tongue work.')}>🎯</button></div>
+      <section className="game-card">
+        <div className="scoreboard">
+          <div><span>SCORE</span><strong>{score}</strong></div>
+          <div><span>TIME</span><strong>{timeLeft}</strong></div>
+          <div><span>BEST</span><strong>{highScore}</strong></div>
+        </div>
+        <div className="game-arena">
+          {gamePhase === 'playing' && (
+            <button className="game-target" aria-label="Target" onClick={hitTarget} style={{ left: `${target.x * 100}%`, top: `${target.y * 100}%` }}>👅</button>
+          )}
+          {gamePhase !== 'playing' && (
+            <div className="game-overlay">
+              <span className="eyebrow">{gamePhase === 'over' ? 'TIME!' : '30 SECOND CHALLENGE'}</span>
+              <h2>{gamePhase === 'over' ? `${score} hits` : 'Lick the targets.'}</h2>
+              <p>Point with your index finger. Stick out your tongue when the cursor is over the target.</p>
+              <button className="primary" disabled={!active} onClick={startGame}>{gamePhase === 'over' ? 'Play again' : 'Start game'}</button>
+              {!active && <small>Enable the camera first.</small>}
+            </div>
+          )}
+        </div>
       </section>
 
       {active && handVisible && <div className={`gaze-cursor ${lastClick && Date.now() - lastClick < 350 ? 'clicked' : ''}`} style={{ left: `${cursor.x * 100}%`, top: `${cursor.y * 100}%` }} />}
