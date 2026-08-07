@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { FaceLandmarker, FilesetResolver, HandLandmarker } from '@mediapipe/tasks-vision'
-import { TongueClickDetector } from './gesture'
+import { TongueClickDetector, tongueGestureScore } from './gesture'
 
 type Point = { x: number; y: number }
 type Status = 'idle' | 'loading' | 'tracking' | 'paused' | 'error'
@@ -98,7 +98,7 @@ function App() {
     if (faceRef.current && now - lastFaceFrameRef.current > 65) {
       lastFaceFrameRef.current = now
       const faceResult = faceRef.current.detectForVideo(video, now)
-      const score = faceResult.faceBlendshapes[0]?.categories.find((category) => category.categoryName === 'tongueOut')?.score ?? 0
+      const score = tongueGestureScore(faceResult.faceLandmarks[0], faceResult.faceBlendshapes[0]?.categories)
       setTongueScore(score)
       if (statusRef.current === 'tracking' && detectorRef.current.update(score, now)) {
         clickAt(smoothPointRef.current)
